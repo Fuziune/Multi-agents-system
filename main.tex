@@ -1,0 +1,185 @@
+\documentclass[a4paper, 11pt]{article}
+\usepackage{geometry}
+\usepackage{url}
+\usepackage{color}
+
+
+\linespread{1}
+
+\geometry{a4paper,top=3cm,left=3cm,right=2.5cm,bottom=2cm}
+
+\usepackage{hyperref}
+\hypersetup{colorlinks,linkcolor=black,citecolor=blue}
+
+% Additional packages required for tables
+\usepackage{booktabs}
+\usepackage{enumitem}
+
+
+\title{\textbf{Laboratory assignment} \\[1ex] \large \textbf{Component 4:} Problem Definition and MAS Specification for SP2}
+
+\author{\textbf{Authors:} Fusarau Ioan, Dreghici Bogdan\\ \textbf{Group:} ICA 1}
+
+\date{April 28, 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem Definition}
+
+The objective of the second software project (SP2) is to design and
+implement, \emph{from scratch}, a Multi-Agent System (MAS) that simulates
+collaborative wildfire suppression on a discrete two-dimensional grid.
+The system models a forest (or building floor) discretised as a grid of
+cells, in which a small number of cells are initially set on fire. Fire
+propagates stochastically over time to neighbouring vegetation, while a
+configurable team of autonomous firefighter agents moves on the grid,
+locating burning cells and extinguishing them.
+
+The problem is interesting from a Distributed Artificial Intelligence
+(DAI) perspective for three reasons. First, the global goal containing
+the fire before it spreads out of control cannot be achieved
+efficiently by a single agent: as the burning perimeter grows, only a
+distributed team can react in time. Second, the agents must coordinate
+implicitly, avoiding redundant work (e.g., two firefighters running to the
+same cell) without a central commander. Third, the environment is
+inherently dynamic and partially observable: the world changes between
+agent decisions, and each agent perceives only a local neighbourhood.
+
+A simulation run is considered \emph{successful} if all fires are
+extinguished before a configurable damage threshold (e.g., 40\% of the
+grid burnt) is reached. Otherwise, the run is considered a \emph{failure}.
+The system reports per-tick statistics (number of burning cells, number of
+extinguished cells, agent positions) and a final outcome summary.
+
+\section{High-Level MAS Specification}
+
+\subsection{Inputs and Outputs}
+
+\paragraph{Inputs to the MAS.}
+\begin{itemize}[leftmargin=*]
+\item \textbf{Grid configuration:} grid dimensions \texttt{(rows, cols)}.
+\item \textbf{Initial fire seeds:} a list of \texttt{(row, col)} cells set
+on fire at $t=0$.
+\item \textbf{Number of agents} $N$ (configurable, $N \geq 1$).
+\item \textbf{Fire spread probability} $p \in [0, 1]$ --- the probability
+that a burning cell ignites each unburnt orthogonal neighbour per tick.
+\item \textbf{Maximum simulation length} (in ticks) and the
+\textbf{damage threshold} for failure.
+\item \textbf{Strategy selector} for the firefighter agents
+(e.g., \emph{nearest-fire greedy}, \emph{region partitioning}).
+\end{itemize}
+
+\paragraph{Outputs of the MAS.}
+\begin{itemize}[leftmargin=*]
+\item \textbf{Per-tick simulation log:} grid state (each cell as
+\textsc{intact}, \textsc{burning}, \textsc{extinguished}, or
+\textsc{ash}); agent positions and current targets; claim table.
+\item \textbf{Aggregate statistics:} total burnt area, number of
+extinguishing actions per agent, average response time per fire.
+\item \textbf{Final outcome:} \texttt{SUCCESS} (all fires out below the
+damage threshold) or \texttt{FAILURE} (threshold exceeded or simulation
+timeout).
+\end{itemize}
+
+\subsection{Types of Agents}
+
+The MAS contains two types of entities:
+
+\begin{enumerate}
+\item \textbf{Firefighter Agent} (active, instantiated $N$ times):
+an autonomous, mobile, reactive agent whose role is to perceive the local
+grid, select a target burning cell, and extinguish it. Each firefighter
+runs in its own thread, executing concurrently with the others.
+\item \textbf{Environment Agent} (single instance): a passive coordinator
+that maintains the authoritative grid state, advances fire propagation
+each tick, and provides a \emph{blackboard} interface through which
+firefighter agents read and write shared information (current grid,
+claimed targets).
+\end{enumerate}
+
+\subsection{Specification of Agents}
+
+\subsubsection{Firefighter Agent}
+
+\begin{tabular}{p{3cm}p{10.5cm}}
+\toprule
+\textbf{Inputs}   & Local perception of the grid (cells within a configurable visibility radius), the current claim table, and the agent's own position. \\
+\textbf{Outputs}  & Movement actions (\textsc{move-north}, \textsc{move-south}, \textsc{move-east}, \textsc{move-west}, \textsc{stay}); the \textsc{extinguish} action when standing on a burning cell; updates to the claim table. \\
+\textbf{Task}     & Locate burning cells, claim a target on the blackboard, navigate to it, and extinguish it. Iterate until no burning cells remain or the simulation ends. \\
+\bottomrule
+\end{tabular}
+
+\subsubsection{Environment Agent}
+
+\begin{tabular}{p{3cm}p{10.5cm}}
+\toprule
+\textbf{Inputs}   & The current grid state; the action requests submitted by firefighter agents during the current tick. \\
+\textbf{Outputs}  & Updated grid state at $t+1$: stochastic fire propagation applied to the neighbours of every burning cell, and the effects of each firefighter's action committed atomically. \\
+\textbf{Task}     & Maintain a globally consistent world state, advance the simulation clock, enforce action validity, and detect terminal conditions (success / failure). \\
+\bottomrule
+\end{tabular}
+
+\subsection{Communications among Agents}
+
+Communication is realised through a \textbf{shared blackboard}, which is
+the canonical communication model for spatial multi-agent simulations and
+is one of the two models recommended in the project requirements (the
+alternative being explicit message passing).
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Medium.} A central \texttt{Blackboard} object owned by the
+Environment Agent contains: (i) the grid state, (ii) the agent
+position table, and (iii) the \emph{claim table}, mapping each claimed
+burning cell to the firefighter that committed to extinguish it.
+\item \textbf{Synchronisation.} The blackboard is protected by a mutex
+(reentrant lock). Reads return a consistent snapshot; writes are atomic.
+This allows firefighter threads to coordinate without explicit
+peer-to-peer messages.
+\item \textbf{Coordination protocol.} Before moving toward a target,
+a firefighter \emph{publishes a claim} on the blackboard. Other
+firefighters see the claim during their own perception step and
+exclude already-claimed cells from their candidate target set,
+preventing redundant work. Claims expire when the target is either
+extinguished or no longer burning.
+\item \textbf{Implicit message types.} Although no FIPA-ACL message bus
+is used, the interactions can be mapped onto speech acts for
+documentation purposes: a claim corresponds to an \textsc{inform} act
+(``I am committing to cell $X$''); a perception of a competitor's claim
+corresponds to a passive \textsc{inform} reception; a successful
+extinguishing corresponds to an \textsc{inform-done} act that frees the
+claim.
+\item \textbf{Configurability.} The communication model is encapsulated
+behind a \texttt{CommunicationLayer} interface, so a future variant of
+the system can replace the blackboard with explicit message passing
+(e.g., per-agent inboxes implemented with thread-safe queues) without
+touching the agent logic.
+\end{itemize}
+
+\subsection{Agents' Role within the MAS}
+
+The firefighter agents collectively realise the system's primary goal:
+\emph{containing and extinguishing the fire}. They are heterogeneous only
+in identity (each has a unique ID) and homogeneous in behaviour, which
+makes the team symmetric and easily scalable to any $N$. The Environment
+Agent plays the supporting role of \emph{world simulator and arbiter};
+it does not pursue an autonomous goal, but it ensures that the
+firefighters' concurrent actions resolve into a coherent, conflict-free
+shared reality. Together, the two agent types form a cooperative,
+non-competitive MAS in which the only adversary is the dynamics of the
+fire itself.
+
+\section{Conclusion}
+
+This document defines the problem to be solved by SP2 collaborative
+distributed wildfire suppression and provides a high-level
+specification of the corresponding multi-agent system. The specification
+identifies the system's inputs and outputs, the two types of agents
+involved (firefighter and environment), the precise input/output/task
+contract for each, and the blackboard-based communication protocol that
+enables decentralised coordination. The conceptual analysis (PAGES, PEAS,
+environment properties), the architectural design, and the Python
+implementation will be developed in the subsequent components.
+
+\end{document}
